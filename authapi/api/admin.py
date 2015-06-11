@@ -1,6 +1,6 @@
 from django import forms
 from django.contrib import admin
-from api.models import AuthEvent, UserData, ACL, CreditsAction, User
+from api.models import AuthEvent, UserData, ACL, User
 from authmethods.models import Message, ColorList, Code, Connection
 from authmethods import METHODS
 from django.contrib.auth.admin import UserAdmin
@@ -10,7 +10,8 @@ from django.contrib.auth.admin import UserAdmin
 class AuthEventAdminForm(forms.ModelForm):
     class Meta:
         model = AuthEvent
-        fields = ('auth_method', 'auth_method_config', 'extra_fields')
+        fields = ('auth_method', 'census', 'auth_method_config', 'extra_fields',
+                'status')
         choices = []
         for k in METHODS.keys():
             choices.append((k, k + ': ' + METHODS.get(k).DESCRIPTION))
@@ -22,16 +23,21 @@ class AuthEventAdminForm(forms.ModelForm):
 
 class AuthEventAdmin(admin.ModelAdmin):
     form = AuthEventAdminForm
-    list_display = ('id', 'auth_method')
+    list_display = ('id', 'auth_method', 'status')
+    list_filter = ('auth_method', 'status')
+    search_fields = ('id',)
 
 
 class UserDataAdmin(admin.ModelAdmin):
     list_display = ('user', 'status')
+    search_fields = ('user__username', 'status', 'metadata', 'user__email', 'tlf')
 
 
 class ACLAdmin(admin.ModelAdmin):
     list_display = ('user', 'perm', 'object_type', 'object_id')
     list_filter = ('perm', 'object_type')
+    search_fields = ('user__user__username', 'user__user__email', 'user__metadata',
+                     'perm', 'object_type', 'object_id')
 
 
 class ColorListAdmin(admin.ModelAdmin):
@@ -43,13 +49,11 @@ class MessageAdmin(admin.ModelAdmin):
 
 
 class CodeAdmin(admin.ModelAdmin):
-    pass
+    list_display = ('auth_event_id', 'user', 'code', 'created')
+    date_hierarchy = 'created'
 
 
 class ConnectionAdmin(admin.ModelAdmin):
-    pass
-
-class CreditsActionAdmin(admin.ModelAdmin):
     pass
 
 class UserDataInline(admin.StackedInline):
@@ -57,7 +61,8 @@ class UserDataInline(admin.StackedInline):
 
 class CustomUserAdmin(UserAdmin):
     def change_view(self, request, obj_id):
-        self.inlines=[UserDataInline,]
+        # Has required fields and don't let us to modify users in the admin
+        #self.inlines=[UserDataInline,]
         return super(CustomUserAdmin, self).change_view(request, obj_id)
 
     def add_view(self, request):
@@ -75,4 +80,3 @@ admin.site.register(ColorList, ColorListAdmin)
 admin.site.register(Message, MessageAdmin)
 admin.site.register(Code, CodeAdmin)
 admin.site.register(Connection, ConnectionAdmin)
-admin.site.register(CreditsAction, CreditsActionAdmin)

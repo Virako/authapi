@@ -1,6 +1,6 @@
-# authapi [![Build Status][1]][2] [![Coverage Status](https://coveralls.io/repos/agoravoting/authapi/badge.png)](https://coveralls.io/r/agoravoting/authapi)
+# authapi [![Build Status][1]][2] [![Coverage Status](https://coveralls.io/repos/agoravoting/authapi/badge.svg?branch=master)](https://coveralls.io/r/agoravoting/authapi?branch=master)
 
-[1]: https://travis-ci.org/agoravoting/authapi.png
+[1]: https://travis-ci.org/agoravoting/authapi.svg?branch=master
 [2]: https://travis-ci.org/agoravoting/authapi
 
 # Introduction
@@ -44,6 +44,7 @@ kind of object.
 
 2. Install package and its dependencies
     ```
+    $ sudo apt-get install libfreetype6-dev # necessary for captcha generator, pillow require it
     $ mkvirtualenv myenv
     $ pip install -r requirements.txt
     ```
@@ -55,9 +56,13 @@ kind of object.
     $ createdb -O authapi authapi
     ```
 
-4. Load initial data. This command create username admin with password admin, CHANGE IT:
+4. Create scheme and load initial data. This command create username admin with
+password admin for initial data, and tlf "+34666666666" and code "admin123" for
+saas. Not very secure credentials for a production environment (on purpose -
+change it!) but works for a first go:
     ```
-    $ ./manage.py loaddata initial
+    $ ./manage.py migrate
+    $ ./manage.py loaddata initial # you can also use "saas" instead of "initial"
     ```
 
 5. Run:
@@ -70,6 +75,11 @@ kind of object.
     $ ./manage.py syncdb
     $ ./manage.py celeryd
     ```
+
+Optional. Added some plugin:
+    Install plugins with pip or by other way
+    Added plugins to PLUGINS in settings
+    Enjoy of your plugin
 
 # Tecnical details
 
@@ -88,7 +98,6 @@ Basic Database tables:
 * User
     * id: string (255), random uuid, identifies the user uniquely
     * event: auth-event associate
-    * credits: credits for create auth-event
     * metadata: json-string
     * status: string (255): used to flag the user
 * ACL
@@ -98,15 +107,6 @@ Basic Database tables:
     * object_type: string (255) type of object to which the user is granted permission to. required
     * object_id: string (255) object related to which the user is granted permission to id
       (default=0) mean permission in all id
-* CreditsAction
-    * user: userdata associate
-    * action: choice add or spend
-    * status: created, paid, etc
-    * quantity: int
-    * authevent: auth-event associate
-    * payment_metadata: json-string
-    * created: datetime
-    * updated: datetime
 
 The authapi is extensible using modules. The mudile can extend authapi in
 different entry points defined in authapi, providing:
@@ -139,6 +139,7 @@ permission to a given object type and object id  (object id not required).
 IMPORTANT NOTE: if not especific id, default_id is 0. if id is 0, the user have permission about all id
 
 Request:
+    
     {
       "user": "someone"
       "object_type": "User",
@@ -171,6 +172,7 @@ Required user with write permission for give permissions. Create an ACL entry.
 IMPORTANT NOTE: if not especific id, default_id is 0. if id is 0, the user have permission about all id
 
 Request:
+    
     {
       "user": "someone"
       "object_type": "User",
@@ -187,11 +189,12 @@ Required user with write permission for delete permissions. Delete an ACL entry.
 IMPORTANT NOTE: if not especific id, default_id is 0. if id is 0, the user have permission about all id
 
 Request:
-{
-  "user": "someone"
-  "object_type": "User",
-  "permission": "create",
-}
+
+    {
+      "user": "someone"
+      "object_type": "User",
+      "permission": "create",
+    }
 
 If everything is ok, it returns STATUS 200
 
@@ -205,7 +208,7 @@ Valid Input example:
     {
         "auth_method": "sms",
         "census": "open",
-        "config": {"sms-message": "Enter in __LINK__ and put this code __CODE__"},
+        "config": {"msg": "Enter in %(url)s and put this code %(code)s"},
         "extra_fields": [
                 {
                 "name": "name",
@@ -283,23 +286,32 @@ Description: Get census of auth-event id.
 Perms: object_type: 'AuthEvent', perm: 'edit', oject_id: auid
 
 Description: import census data by administrator.
-When new user register, check if there is enough credits.
-When create users, the administrator will get perms 'edit' about new users.
+If user status == registered:
+    When create users, the administrator will get perms 'edit' about new users.
+If user status == used:
+    Not apply perms.
 
 Request: 
-    [
-        {
-            "tlf": "+34666666666", 
-            "dni": "11111111H", 
-            "email": "foo@test.com",  
-        },
-        { 
-            "tlf": "+3377777777", 
-            "dni": "22222222P", 
-            "email": "bar@test.com",  
-        },
-        ..
-    ]
+    
+    {
+        "field-validation": "disabled|enabled",
+        "census":
+            [
+                {
+                    "tlf": "+34666666666", 
+                    "dni": "11111111H", 
+                    "email": "foo@test.com",  
+                    "status": "registered"
+                },
+                { 
+                    "tlf": "+3377777777", 
+                    "dni": "22222222P", 
+                    "email": "bar@test.com",  
+                    "status": "used"
+                },
+                ..
+            ]
+    }
 
 Response: status 200 or status 400 if error
 
@@ -308,13 +320,14 @@ Response: status 200 or status 400 if error
 Perms: object_type: 'AuthEvent', perm: 'edit', oject_id: auid
 
 Description: sends sms/emails (depending on auth method) to the census of an open election for authentication
-If template None, will use the dafult template.
+If template None, will use the dafult template. If user-ids None, will send code all census.
 
 Request:
-{
-    "user-ids": [], # Still not implemented
-    "template": "template with __CODE__ and the link is__LINK__"
-}
+    
+    {
+        "user-ids": [],
+        "template": "template with __CODE__ and the link is__LINK__"
+    }
 
 Response: status 200
 
@@ -326,11 +339,12 @@ Description: Provides authentication. Depending on the auth-method used, the
 input details needed may vary:
 
 Request:
-        {
-            "tlf": "+34666666666", 
-            "dni": "11111111H", 
-            "email": "foo@test.com",  
-        }
+
+    {
+        "tlf": "+34666666666", 
+        "dni": "11111111H", 
+        "email": "foo@test.com",  
+    }
 
 Response: status 200 or status 400 if error
 
@@ -346,6 +360,7 @@ Description: Allows an user to verify if sms or email code and login.
 If #auid if 0, 'user-and-password method is used.
 
 Request:
+    
     {
         "dni": "11111111H",
         "mail": "test@agoravoting.com",
@@ -354,38 +369,9 @@ Request:
     }
 
 Response: If authenticate is successful, it returns STATUS 200 with data:
+    
     {
       "auth-token": "khmac:///sha-256;deadbeefdeadbeefdeadbeefdeadbeefdeadbeef/userid:timestamp"
-    }
-
-## GET /pack/
-
-Allows a login user view his packs:
-
-If successful, return list of packs.
-
-## POST /pack/
-
-Allows a login user create or edit a own package. A valid input could be:
-
-Create:
-
-    {
-        "name": "b",
-    }
-
-Edit:
-
-    {
-        "pack": 1,
-        "status": "pai",
-    }
-
-A valid answer would be a STATUS 200 with the following data:
-
-    {
-      "status": "ok",
-      "id": 1
     }
 
 ## GET /user/#id
@@ -400,39 +386,35 @@ Perms: object_type: 'UserData', perm: 'view', oject_id: id
 
 Description: Get ids auth-event of request user
 
-## GET /available-prices
-
-Perms: none
-
-Description: Get information about prices
-
-## GET /available-payment-methods
-
-Perms: none
-
-Description: Get information about payment methods
-
-## POST /user/#id/add-credits
-
-Perms: object_type: 'UserData', perm: 'edit', oject_id: id
-
-Description: Allows a login user create new add_credits action.
-
-Request: 
-    {
-        "pack_id": 0,
-        "num_credits": 500,
-        "payment_method": "paypal"
-    }
-
-Response:
-    {
-        "paypal_url": "foo"
-    }
-
 # Utils Commands
 
-* Generate config auth-event and create auth-event:
-    ```
-    ./manage.py add_event --help
-    ```
+* Look at agora-admin.py script in [agora-tools](https://github.com/agoravoting/agora-tools/)
+
+# License
+
+Copyright (C) 2015 Agora Voting SL and/or its subsidiary(-ies).
+Contact: legal@agoravoting.com
+
+This file is part of the authapi module of the Agora Voting project.
+
+This program is distributed in the hope that it will be useful, but WITHOUT ANY
+WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+PARTICULAR PURPOSE.  See the GNU General Public License for more details.
+
+Commercial License Usage
+Licensees holding valid commercial Agora Voting project licenses may use this
+file in accordance with the commercial license agreement provided with the
+Software or, alternatively, in accordance with the terms contained in
+a written agreement between you and Agora Voting SL. For licensing terms and
+conditions and further information contact us at legal@agoravoting.com .
+
+GNU Affero General Public License Usage
+Alternatively, this file may be used under the terms of the GNU Affero General
+Public License version 3 as published by the Free Software Foundation and
+appearing in the file LICENSE.AGPL3 included in the packaging of this file, or
+alternatively found in <http://www.gnu.org/licenses/>.
+
+External libraries
+This program distributes libraries from external sources. If you follow the
+compilation process you'll download these libraries and their respective
+licenses, which are compatible with our licensing.

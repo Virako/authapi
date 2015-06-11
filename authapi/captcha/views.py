@@ -5,6 +5,8 @@ import string
 from django.views.generic import View
 from django.http import HttpResponse
 from django.conf import settings
+from django.db import transaction
+from djcelery import celery
 
 try:
     from PIL import Image, ImageDraw, ImageFont, ImageFilter
@@ -17,27 +19,39 @@ except ImportError:
 from .models import Captcha
 
 
+def newcaptcha():
+    letters = string.ascii_uppercase + string.digits
+    code = ''.join(random.choice(letters) for _ in range(10))
+    challenge = ''.join(random.choice(letters) for _ in range(4))
+    make_image(challenge, code)
+    fname = code + '.png'
+    path = '/static/captcha/%s' % fname
+    c = Captcha(code=code, challenge=challenge, path=path)
+    c.save()
+    return c
+
+
+@celery.task
+def generate_captcha(amount=1):
+    from captcha.views import newcaptcha
+    repeat = 0
+    while repeat < amount:
+        newcaptcha()
+        repeat += 1
+
+
 class NewCaptcha(View):
     def get(self, request):
-        # TODO, think about limits to prevent lots of calls because this
-        # creates an image file and we can get out of disk space
+        # TODO: write down ip and put in blacklist if order a lot captchas
+        generate_captcha()
 
-        letters = string.ascii_uppercase + string.digits
-
-        code = ''.join(random.choice(letters) for _ in range(10))
-        challenge = ''.join(random.choice(letters) for _ in range(4))
-
-        make_image(challenge, code)
-
-        fname = code + '.png'
-        path = '/static/captcha/%s' % fname
-
-        c = Captcha(code=code, challenge=challenge, path=path)
-        c.save()
-
+        with transaction.atomic():
+            captcha = Captcha.objects.select_for_update().filter(used=False).first()
+            captcha.used = True
+            captcha.save()
         data = {
-            'captcha_code': c.code,
-            'image_url': c.path
+            'captcha_code': captcha.code,
+            'image_url': captcha.path
         }
         jsondata = json.dumps(data)
         return HttpResponse(jsondata, content_type='application/json')
@@ -78,6 +92,9 @@ def make_image(text, code):
     background_color = '#ffffff'
     letter_rotation = (-35, 35)
     pregen_path = settings.STATIC_ROOT + '/captcha/'
+
+    if not os.path.exists(pregen_path):
+        os.makedirs(pregen_path)
 
     if font_path.lower().strip().endswith('ttf'):
         font = ImageFont.truetype(font_path, font_size)

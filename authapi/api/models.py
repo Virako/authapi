@@ -1,3 +1,4 @@
+import json
 from django.db import models
 from django.contrib.auth.models import User
 
@@ -25,14 +26,21 @@ class AuthEvent(models.Model):
     auth_method = models.CharField(max_length=255)
     census = models.CharField(max_length=5, choices=CENSUS, default="close")
     auth_method_config = JSONField()
-    extra_fields = JSONField()
+    extra_fields = JSONField(blank=True, null=True)
     status = models.CharField(max_length=15, choices=AE_STATUSES, default="notstarted")
 
     def serialize(self):
         d = self.serialize_restrict()
+
+        # auth sends by authmethod
+        from authmethods.models import Code
+        codes = Code.objects.filter(auth_event_id=self.id).count()
+
         d.update({
             'auth_method_config': self.auth_method_config,
+            'auth_method_stats': {self.auth_method: codes}
         })
+
         return d
 
     def serialize_restrict(self):
@@ -58,9 +66,8 @@ STATUSES = (
 class UserData(models.Model):
     user = models.OneToOneField(User, related_name="userdata")
     event = models.ForeignKey(AuthEvent, related_name="userdata", null=True)
-    tlf = models.CharField(max_length=20, null=True)
-    credits = models.FloatField(default=0)
-    metadata = JSONField(default="{}")
+    tlf = models.CharField(max_length=20, blank=True, null=True)
+    metadata = JSONField(default="{}", blank=True, null=True)
     status = models.CharField(max_length=255, choices=STATUSES, default="act")
 
     def get_perms(self, obj, permission, object_id=0):
@@ -77,12 +84,18 @@ class UserData(models.Model):
     def serialize(self):
         d = {
             'username': self.user.username,
-            'credits': self.credits,
         }
         if self.user.email:
             d['email'] = self.user.email
         if self.tlf:
             d['tlf'] = self.tlf
+        return d
+
+    def serialize_data(self):
+        d = self.serialize()
+        del d['username']
+        if self.metadata:
+            d.update(json.loads(self.metadata))
         return d
 
     def __str__(self):
@@ -97,63 +110,24 @@ def create_user_data(sender, instance, created, *args, **kwargs):
 class ACL(models.Model):
     user = models.ForeignKey(UserData, related_name="acls")
     perm = models.CharField(max_length=255)
-    object_type = models.CharField(max_length=255, null=True)
+    object_type = models.CharField(max_length=255, blank=True, null=True)
     object_id = models.CharField(max_length=255, default=0)
+    created = models.DateTimeField(auto_now_add=True)
 
     def serialize(self):
         d = {
             'perm': self.perm,
             'object_type': self.object_type or '',
             'object_id': self.object_id or '',
+            'created': self.created.isoformat() if hasattr(self.created, 'isoformat') else self.created
         }
         return d
 
     def get_hmac(self):
-        if self.object_id:
-            msg = ':'.join((self.user.user.username, self.object_type, str(self.object_id), self.perm))
-        else:
-            msg = ':'.join((self.user.user.username, self.object_type, self.perm))
+        msg = ':'.join((self.user.user.username, self.object_type, str(self.object_id), self.perm))
         khmac = genhmac(settings.SHARED_SECRET, msg)
         return khmac
 
     def __str__(self):
         return "%s - %s - %s - %s" % (self.user.user.username, self.perm,
                                       self.object_type, self.object_id)
-
-
-ACTIONS = (
-    ('add', 'add_credits'),
-    ('spend', 'spend_credits'),
-)
-
-STATUSES_CREDITS = (
-    ('created', 'created'),
-    ('done', 'done'),
-    ('cancelled', 'cancelled'),
-)
-
-class CreditsAction(models.Model):
-    user = models.ForeignKey(UserData, related_name="creditsactions")
-    action = models.CharField(max_length=5, choices=ACTIONS, default="add")
-    status = models.CharField(max_length=10, choices=STATUSES_CREDITS,
-            default="created")
-    quantity = models.FloatField()
-    authevent = models.ForeignKey(AuthEvent, related_name="creditsactions", null=True)
-    payment_metadata = JSONField(default="{}")
-    created = models.DateTimeField(auto_now_add=True)
-    updated = models.DateTimeField(auto_now_add=True)
-
-    #def serialize(self):
-    #    d = {
-    #        'id': self.id,
-    #        'user': self.user.serialize(),
-    #        'quantity': self.quantity,
-    #        'action': self.action,
-    #        'status': self.status,
-    #        'created': self.created.isoformat(),
-    #        'updated': self.updated.isoformat(),
-    #    }
-    #    return d
-
-    def __str__(self):
-        return self.name

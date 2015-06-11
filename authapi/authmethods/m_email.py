@@ -2,7 +2,7 @@ import json
 from django.conf import settings
 from django.conf.urls import patterns, url
 from django.contrib.auth.models import User
-from utils import genhmac, constant_time_compare, send_code
+from utils import genhmac, constant_time_compare, send_codes
 
 from . import register_method
 from authmethods.utils import *
@@ -14,11 +14,13 @@ class Email:
     DESCRIPTION = 'Register by email. You need to confirm your email.'
     CONFIG = {
         'subject': 'Confirm your email',
-        'msg': 'Click in this link for validate your email: ',
-        'mail_from': 'authapi@agoravoting.com',
-        'give_perms': {'object_type': 'Vote', 'perms': ['create',] },
+        'msg': 'Click %(url)s and put this code %(code)s'
     }
     PIPELINES = {
+        'give_perms': [
+            {'object_type': 'UserData', 'perms': ['edit',], 'object_id': 'UserDataId' },
+            {'object_type': 'AuthEvent', 'perms': ['vote',], 'object_id': 'AuthEventId' }
+        ],
         "register-pipeline": [
             ["check_whitelisted", {"field": "ip"}],
             ["check_blacklisted", {"field": "ip"}],
@@ -28,51 +30,96 @@ class Email:
             #['check_total_connection', {'times': 5 }],
         ]
     }
+    USED_TYPE_FIELDS = ['email']
 
-    email_definition = { "name": "email", "type": "text", "required": True, "min": 4, "max": 255, "required_on_authentication": True }
+    email_definition = { "name": "email", "type": "email", "required": True, "min": 4, "max": 255, "required_on_authentication": True }
     code_definition = { "name": "code", "type": "text", "required": True, "min": 6, "max": 255, "required_on_authentication": True }
+
+    def check_config(self, config):
+        """ Check config when create auth-event. """
+        msg = ''
+        for c in config:
+            if not c in ('subject', 'msg'):
+                msg += "Invalid config: %s not possible.\n" % c
+        return msg
 
     def census(self, ae, request):
         req = json.loads(request.body.decode('utf-8'))
+        validation = req.get('field-validation', 'enabled') == 'enabled'
+
         msg = ''
         current_emails = []
-        for r in req:
+        for r in req.get('census'):
             email = r.get('email')
-            msg += check_value(self.email_definition, email)
-            msg += check_fields_in_request(r, ae)
-            if User.objects.filter(email=email, userdata__event=ae):
-                msg += "Email %s repeat." % email
-            if email in current_emails:
-                msg += "Email %s repeat." % email
-            current_emails.append(email)
-        if msg:
+            if isinstance(email, str):
+                email = email.strip()
+            msg += check_field_type(self.email_definition, email)
+            if validation:
+                msg += check_field_type(self.email_definition, email)
+                msg += check_field_value(self.email_definition, email)
+            msg += check_fields_in_request(r, ae, 'census', validation=validation)
+            if validation:
+                msg += exist_user(r, ae)
+                if email in current_emails:
+                    msg += "Email %s repeat in this census." % email
+                current_emails.append(email)
+            else:
+                if msg:
+                    msg = ''
+                    continue
+                exist = exist_user(r, ae)
+                if exist and not exist.count('None'):
+                    continue
+                used = r.get('status', 'registered') == 'used'
+                u = create_user(r, ae, used)
+                give_perms(u, ae)
+        if msg and validation:
             data = {'status': 'nok', 'msg': msg}
             return data
 
-        for r in req:
-            u = create_user(r, ae)
-            give_perms(u, ae)
+        if validation:
+            for r in req.get('census'):
+                used = r.get('status', 'registered') == 'used'
+                u = create_user(r, ae, used)
+                give_perms(u, ae)
         return {'status': 'ok'}
 
     def register(self, ae, request):
         req = json.loads(request.body.decode('utf-8'))
-        msg = ''
-        email = req.get('email')
-        msg += check_value(self.email_definition, email)
-        msg += check_fields_in_request(req, ae)
-        if User.objects.filter(email=email, userdata__event=ae):
-            msg += "Email %s repeat." % email
-        if msg:
-            data = {'status': 'nok', 'msg': msg}
-            return data
 
         msg = check_pipeline(request, ae)
         if msg:
             return msg
 
-        u = create_user(req, ae)
-        give_perms(u, ae)
-        send_code(u)
+        msg = ''
+        email = req.get('email')
+        if isinstance(email, str):
+            email = email.strip()
+        msg += check_field_type(self.email_definition, email)
+        msg += check_field_value(self.email_definition, email)
+        msg += check_fields_in_request(req, ae)
+        if msg:
+            data = {'status': 'nok', 'msg': msg}
+            return data
+        msg_exist = exist_user(req, ae, get_repeated=True)
+        if msg_exist:
+            u = msg_exist.get('user')
+            if u.is_active:
+                msg += msg_exist.get('msg') + "Already registered."
+            codes = Code.objects.filter(user=u.userdata).count()
+            if codes > settings.SEND_CODES_EMAIL_MAX:
+                msg += msg_exist.get('msg')  + "Maximun number of codes sent."
+            else:
+                u = edit_user(u, req, ae)
+        else:
+            u = create_user(req, ae)
+            msg += give_perms(u, ae)
+
+        if msg:
+            data = {'status': 'nok', 'msg': msg}
+            return data
+
+        send_codes.apply_async(args=[[u.id,]])
         return {'status': 'ok'}
 
     def authenticate_error(self):
@@ -83,9 +130,13 @@ class Email:
         req = json.loads(request.body.decode('utf-8'))
         msg = ''
         email = req.get('email')
-        msg += check_value(self.email_definition, email)
-        msg += check_value(self.code_definition, req.get('code'))
-        msg += check_fields_in_request(req, ae)
+        if isinstance(email, str):
+            email = email.strip()
+        msg += check_field_type(self.email_definition, email, 'authenticate')
+        msg += check_field_value(self.email_definition, email, 'authenticate')
+        msg += check_field_type(self.code_definition, req.get('code'), 'authenticate')
+        msg += check_field_value(self.code_definition, req.get('code'), 'authenticate')
+        msg += check_fields_in_request(req, ae, 'authenticate')
         if msg:
             data = {'status': 'nok', 'msg': msg}
             return data
@@ -96,11 +147,13 @@ class Email:
 
         try:
             u = User.objects.get(email=email, userdata__event=ae)
-            code = Code.objects.get(user=u.userdata, code=req.get('code'))
         except:
+            return {'status': 'nok', 'msg': 'User not exist.'}
+
+        code = Code.objects.filter(user=u.userdata,
+                code=req.get('code')).order_by('created').first()
+        if not code:
             return {'status': 'nok', 'msg': 'Invalid code.'}
-        if not constant_time_compare(code.code, req.get('code')):
-            return self.authenticate_error()
 
         msg = check_metadata(req, u)
         if msg:

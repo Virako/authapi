@@ -1,10 +1,14 @@
+from django.conf import settings
+
+
 pwd_auth = {'username': 'john', 'password': 'smith'}
 
 pwd_auth_email = {'email': 'john@agoravoting.com', 'password': 'smith'}
 
 auth_event1 = {
     "auth_method": "sms",
-    "config": {"sms-message": "Enter in __LINK__ and put this code __CODE__"},
+    "census": "close",
+    "config": {"msg": "Enter in %(url)s and put this code %(code)s"},
     "extra_fields": [
             {
             "name": "name",
@@ -17,7 +21,7 @@ auth_event1 = {
             },
             {
             "name": "email",
-            "type": "text",
+            "type": "email",
             "required": True,
             "min": 4,
             "max": 255,
@@ -38,20 +42,29 @@ auth_event1 = {
 auth_event2 = {
     "auth_method": "sms",
     "census": "open",
-    "config": {"sms-message": "Enter in __LINK__ and put this code __CODE__"},
+    "config": {"msg": "Enter in %(url)s and put this code %(code)s"},
     "extra_fields": [
             {
             "name": "name",
             "help": "put the name that appear in your dni",
             "type": "text",
             "required": False,
-            "max": 2,
+            "min": 2,
             "max": 64,
             "required_on_authentication": False
             },
             {
+            "name": "age",
+            "help": "put the age",
+            "type": "int",
+            "required": False,
+            "min": 18,
+            "max": 150,
+            "required_on_authentication": False
+            },
+            {
             "name": "email",
-            "type": "text",
+            "type": "email",
             "required": True,
             "min": 4,
             "max": 255,
@@ -74,7 +87,7 @@ auth_event3 = {
     "census": "open",
     "config": {
         "subject": "Confirm your email",
-        "msg": "Click __LINK__ and put this code __CODE__"
+        "msg": "Click %(url)s and put this code %(code)s"
     }
 }
 
@@ -103,43 +116,127 @@ auth_event5 = {
 admin = {'username': 'john', 'password': 'smith'}
 
 # Census
-census_email_default = [
+census_email_default = {
+    "field-validation": "enabled",
+    "census": [
         {"email": "baaa@aaa.com"},
         {"email": "caaa@aaa.com"},
         {"email": "daaa@aaa.com"},
         {"email": "eaaa@aaa.com"}
-]
+    ]
+}
 
-census_email_fields = [
+census_email_default_used = {
+    "field-validation": "enabled",
+    "census": [
+        {"email": "baaa@aaa.com", "status": "used"},
+        {"email": "caaa@aaa.com", "status": "used"},
+        {"email": "daaa@aaa.com", "status": "used"},
+        {"email": "eaaa@aaa.com", "status": "used"}
+    ]
+}
+
+census_email_fields = {
+    "field-validation": "enabled",
+    "census": [
         {"name": "aaaa", "email": "baaa@aaa.com"},
         {"name": "baaa", "email": "caaa@aaa.com"},
         {"name": "caaa", "email": "daaa@aaa.com"},
         {"name": "daaa", "email": "eaaa@aaa.com"}
-]
+    ]
+}
 
-census_email_repeat = [
+census_email_repeat = {
+    "field-validation": "enabled",
+    "census": [
         {"email": "repeat@aaa.com"},
         {"email": "repeat@aaa.com"}
-]
+    ]
+}
 
-census_sms_default = [
+census_email_no_validate = {
+    "field-validation": "disabled",
+    "census": [
+        {"dni": "11111112H", "email": ""}, # without email and bad dni
+        {"dni": "22222222J", "email": ""}, # without email and good dni
+        {"dni": "", "email": "qwerty@test.com"}, # without dni
+        {"dni": "", "email": "qwerty@test.com"}, # email repeat
+        {"dni": True, "email": "qwerty2@test.com"}, # dni bad type
+        {"dni": "123123123J", "email": "qwerty"}, # email bad
+        {"email": "i\u0144test@test.com"}, # email bad encode
+        {"dni": "11111111H", "email": "@@"},
+        {"dni": "11111111H", "email": "@@"} # dni repeat 
+    ]
+}
+
+
+census_sms_default = {
+    "field-validation": "enabled",
+    "census": [
         {"tlf": "666666667"},
         {"tlf": "666666668"},
         {"tlf": "666666669"},
         {"tlf": "666666670"}
-]
+    ]
+}
 
-census_sms_fields = [
+census_sms_default_used = {
+    "field-validation": "enabled",
+    "census": [
+        {"tlf": "666666667", "status": "used"},
+        {"tlf": "666666668", "status": "used"},
+        {"tlf": "666666669", "status": "used"},
+        {"tlf": "666666670", "status": "used"}
+    ]
+}
+
+census_sms_fields = {
+    "field-validation": "enabled",
+    "census": [
         {"name": "aaaa", "tlf": "666666665"},
         {"name": "baaa", "tlf": "666666667"},
         {"name": "caaa", "tlf": "666666668"},
         {"name": "daaa", "tlf": "666666669"}
-]
+    ]
+}
 
-census_sms_repeat = [
+census_sms_repeat = {
+    "field-validation": "enabled",
+    "census": [
         {"tlf": "777777777"},
         {"tlf": "777777777"}
-]
+    ]
+}
+
+census_email_unique_dni = {
+    "field-validation": "enabled",
+    "census": [
+        {"dni": "11111111H", "email": "aaa@aaa.com"},
+        {"dni": "22222222J", "email": "bbb@bbb.com"}
+    ]
+}
+
+census_sms_unique_dni = {
+    "field-validation": "enabled",
+    "census": [
+        {"dni": "11111111H", "tlf": "111111111"},
+        {"dni": "22222222J", "tlf": "222222222"}
+    ]
+}
+
+census_sms_no_validate = {
+    "field-validation": "disabled",
+    "census": [
+        {"dni": "11111112H", "tlf": ""}, # without tlf and bad dni
+        {"dni": "22222222J", "tlf": ""}, # without tlf and good dni
+        {"dni": "", "tlf": "111111111"}, # without dni
+        {"dni": "", "tlf": "111111111"}, # tlf repeat
+        {"dni": 123, "tlf": "222222222"}, # dni bad type
+        {"dni": "11111111H", "tlf": "333333333"},
+        {"dni": "11111111H", "tlf": "444444444"} # dni repeat 
+    ]
+}
+
 
 # Register
 register_email_default = {"email": "bbbb@aaa.com", "captcha": "asdasd"}
@@ -149,6 +246,11 @@ register_email_fields = {"name": "aaaa", "email": "bbbb@aaa.com", "captcha": "as
 register_sms_default = {"tlf": "666666667", "captcha": "asdasd"}
 
 register_sms_fields = {"name": "aaaa", "tlf": "666666667", "captcha": "asdasd"}
+
+sms_fields_incorrect_type1 = {"age": "a lot"}
+sms_fields_incorrect_type2 = {"tlf": 666666667}
+sms_fields_incorrect_len1 = {"age": 16}
+sms_fields_incorrect_len2 = {"name": 100*"n"}
 
 # Authenticate
 auth_email_default = {
@@ -175,7 +277,7 @@ auth_sms_fields = {
 
 # Authmethod config
 pipe_total_max_ip =  8
-pipe_total_max_tlf = 3
+pipe_total_max_tlf = 4
 pipe_total_max_tlf_with_period = 60
 pipe_total_max_period = 60
 pipe_times = 5
@@ -184,9 +286,13 @@ pipe_timestamp = 5
 authmethod_config_email_default = {
         "config": {
             "subject": "Confirm your email",
-            "msg": "Click __LINK__ and put this code __CODE__"
+            "msg": "Click %(url)s and put this code %(code)s"
         },
         "pipeline": {
+            'give_perms': [
+                {'object_type': 'UserData', 'perms': ['edit',], 'object_id': 'UserDataId' },
+                {'object_type': 'AuthEvent', 'perms': ['vote',], 'object_id': 'AuthEventId' }
+            ],
             "register-pipeline": [
                 ["check_whitelisted", {"field": "ip"}],
                 ["check_blacklisted", {"field": "ip"}],
@@ -200,16 +306,13 @@ authmethod_config_email_default = {
 
 authmethod_config_sms_default = {
         "config": {
-            "SMS_PROVIDER": "console",
-            "SMS_DOMAIN_ID": "",
-            "SMS_LOGIN": "",
-            "SMS_PASSWORD": "",
-            "SMS_URL": "",
-            "SMS_SENDER_ID": "",
-            "SMS_VOICE_LANG_CODE": "",
-            "sms-message": "Enter in __LINK__ and put this code __CODE__"
+            "msg": "Enter in %(url)s and put this code %(code)s"
         },
         "pipeline": {
+            'give_perms': [
+                {'object_type': 'UserData', 'perms': ['edit',], 'object_id': 'UserDataId' },
+                {'object_type': 'AuthEvent', 'perms': ['vote',], 'object_id': 'AuthEventId' }
+            ],
             "register-pipeline": [
                 ["check_whitelisted", {"field": "tlf"}],
                 ["check_whitelisted", {"field": "ip"}],
@@ -221,7 +324,7 @@ authmethod_config_sms_default = {
             ],
             "authenticate-pipeline": [
                 #['check_total_connection', {'times': pipe_times }],
-                ['check_sms_code', {'timestamp': pipe_timestamp }]
+                #['check_sms_code', {'timestamp': pipe_timestamp }]
             ]
         }
 }
@@ -232,89 +335,92 @@ ae_email_default = {
     "census": "open",
 }
 
+ae_incorrect_authmethod = ae_email_default.copy()
+ae_incorrect_authmethod.update({"auth_method": "a"})
 
-ae_email_config = {
-    "auth_method": "email",
-    "census": "open",
+ae_incorrect_census = ae_email_default.copy()
+ae_incorrect_census.update({"census": "a"})
+
+ae_without_authmethod = ae_email_default.copy()
+ae_without_authmethod.pop("auth_method")
+
+ae_without_census = ae_email_default.copy()
+ae_without_census.pop("census")
+
+ae_email_config = ae_email_default.copy()
+ae_email_config.update( {
     "config": {
         "subject": "Vote",
-        "msg": "Enter in __LINK__ and put this code __CODE__",
+        "msg": "Enter in %(url)s and put this code %(code)s",
     }
-}
+})
 
-ae_email_fields = {
-    "auth_method": "email",
-    "census": "open",
+ae_email_config_incorrect1 = ae_email_config.copy()
+ae_email_config_incorrect1.update({"config": {"aaaaaa": "bbbb"}})
+
+ae_email_config_incorrect2 = ae_email_config.copy()
+ae_email_config_incorrect2.update({"config": "aaaaaa"})
+
+
+ae_email_fields = ae_email_default.copy()
+ae_email_fields.update( {
     "extra_fields": [
             {
             "name": "name",
             "help": "put the name that appear in your dni",
             "type": "text",
             "required": True,
-            "max": 2,
+            "min": 2,
             "max": 64,
             "required_on_authentication": True
             }
     ]
-}
+})
 
-ae_email_fields_incorrect1 = {
-    "auth_method": "email",
-    "census": "open",
-    "extra_fields": [
-            {"boo": True},
-            {"boo": True},
-            {"boo": True},
-            {"boo": True},
-            {"boo": True},
-            {"boo": True},
-            {"boo": True},
-            {"boo": True},
-            {"boo": True},
-            {"boo": True},
-            {"boo": True},
-            {"boo": True},
-            {"boo": True},
-            {"boo": True},
-            {"boo": True},
-            {"boo": True}
-    ]
-}
+ae_email_fields_captcha = ae_email_fields.copy()
+ae_email_fields_captcha.update( {'extra_fields': [{'name': 'captcha', 'type': 'captcha',
+        'required': True, 'required_on_authentication': False}]})
 
-ae_email_fields_incorrect2 = {
-    "auth_method": "email",
-    "census": "open",
-    "extra_fields": [
-            {"boo": True}
-    ]
-}
+ae_email_fields_incorrect_max_fields = ae_email_fields.copy()
+ae_email_fields_incorrect_max_fields.update({"extra_fields": [{"boo": True},
+    {"boo": True}, {"boo": True}, {"boo": True}, {"boo": True}, {"boo": True},
+    {"boo": True}, {"boo": True}, {"boo": True}, {"boo": True}, {"boo": True},
+    {"boo": True}, {"boo": True}, {"boo": True}, {"boo": True}, {"boo": True}]})
 
-ae_email_fields_incorrect  = {
-    "auth_method": "email",
-    "census": "open",
-    "extra_fields": [
-            {
-            "name": "name",
-            "type": "text",
-            "required": "True",
-            "max": "yes",
-            "max": 64,
-            "required_on_authentication": True
-            }
-    ]
-}
+ae_email_fields_incorrect_empty = ae_email_fields.copy()
+ae_email_fields_incorrect_empty.update( {'extra_fields': [{'name': '', 'type': 'text', 'required_on_authentication': False}]})
 
-ae_email_config_incorrect1 = {
-    "auth_method": "email",
-    "census": "open",
-    "config": {"aaaaaa": "bbbb"}
-}
+ae_email_fields_incorrect_len1 = ae_email_fields.copy()
+ae_email_fields_incorrect_len1.update( {'extra_fields': [{'name': settings.MAX_SIZE_NAME_EXTRA_FIELD*'ii', 'type': 'text', 'required_on_authentication': False}]})
 
-ae_email_config_incorrect2 = {
-    "auth_method": "email",
-    "census": "open",
-    "config": "aaaaaa"
-}
+from sys import maxsize
+ae_email_fields_incorrect_len2 = ae_email_fields.copy()
+ae_email_fields_incorrect_len2.update( {'extra_fields': [{'name': 'iii', 'type': 'text', 'required_on_authentication': False, 'max': maxsize + 1}]})
+
+ae_email_fields_incorrect_type = ae_email_fields.copy()
+ae_email_fields_incorrect_type.update( {'extra_fields': [{'name': 'name', 'type': 'null', 'required_on_authentication': False}]})
+
+ae_email_fields_incorrect_value_int = ae_email_fields.copy()
+ae_email_fields_incorrect_value_int.update( {'extra_fields': [{'name': 'name', 'type': 'text', 'required_on_authentication': False, 'min': '1'}]})
+
+ae_email_fields_incorrect_value_bool = ae_email_fields.copy()
+ae_email_fields_incorrect_value_bool.update( {'extra_fields': [{'name': 'name', 'type': 'text', 'required_on_authentication': 'False'}]})
+
+ae_email_fields_incorrect = ae_email_fields.copy()
+ae_email_fields_incorrect.update({"extra_fields": [{'name': 'name', 'type': 'text', 'required_on_authentication': False, "boo": True}]})
+
+ae_email_fields_incorrect_repeat = ae_email_fields.copy()
+ae_email_fields_incorrect_repeat.update( {'extra_fields': [
+    {'name': 'surname', 'type': 'text', 'required_on_authentication': False},
+    {'name': 'surname', 'type': 'text', 'required_on_authentication': False}]})
+
+ae_email_fields_incorrect_email = ae_email_fields.copy()
+ae_email_fields_incorrect_email.update( {'extra_fields': [
+    {'name': 'email', 'type': 'email', 'required_on_authentication': False}]})
+
+ae_email_fields_incorrect_status = ae_email_fields.copy()
+ae_email_fields_incorrect_status.update( {'extra_fields': [
+    {'name': 'status', 'type': 'text', 'required_on_authentication': False}]})
 
 ae_sms_default = {
     "auth_method": "sms",
@@ -324,7 +430,7 @@ ae_sms_default = {
 ae_sms_config = {
     "auth_method": "sms",
     "census": "open",
-    "config": {"sms-message": "Enter in __LINK__ and put this code __CODE__"}
+    "config": {"msg": "Enter in %(url)s and put this code %(code)s"}
 }
 
 ae_sms_fields = {
@@ -343,6 +449,10 @@ ae_sms_fields = {
     ]
 }
 
+ae_sms_fields_incorrect_tlf = ae_sms_default.copy()
+ae_sms_fields_incorrect_tlf.update( {'extra_fields': [
+    {'name': 'tlf', 'type': 'tlf', 'required_on_authentication': False}]})
+
 ae_sms_config_incorrect = {
     "auth_method": "sms",
     "census": "open",
@@ -356,3 +466,13 @@ ae_sms_fields_incorrect = {
             {"boo": True}
     ]
 }
+
+extra_field_unique = [
+        {
+            "name": "dni",
+            "type": "text",
+            "required": True,
+            "unique": True,
+            "required_on_authentication": True
+        }
+]

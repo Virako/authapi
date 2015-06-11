@@ -52,6 +52,13 @@ INSTALLED_APPS = (
     'djcelery',
 )
 
+PLUGINS = (
+    # Add plugins here
+)
+
+if PLUGINS:
+    INSTALLED_APPS += PLUGINS
+
 MIDDLEWARE_CLASSES = (
     'django.contrib.sessions.middleware.SessionMiddleware',
     'corsheaders.middleware.CorsMiddleware',
@@ -108,43 +115,34 @@ CORS_ORIGIN_WHITELIST = (
 )
 
 ENABLE_CAPTCHA = True
-
-AVAILABLE_PACKS = [
-    {
-        "id": 0,
-        "name": "basic",
-        "num_credits": 500,
-        "price": {
-            "quote": "250",
-            "unit": "EURO"
-        }
-    },
-    {
-        "id": 1,
-        "name": "premium",
-        "num_credits": 5000,
-        "price": {
-            "quote": "2500",
-            "unit": "EURO"
-        }
-    }
-]
-
-AVAILABLE_PAYMENT_METHODS = ["paypal"]
+PREGENERATION_CAPTCHA = 100
 
 SMS_PROVIDER = "console"
+SMS_DOMAIN_ID = ""
+SMS_LOGIN = ""
+SMS_PASSWORD = ""
+SMS_URL = ""
+SMS_SENDER_ID = ""
+SMS_VOICE_LANG_CODE = ""
+
 MAX_AUTH_MSG_SIZE = {
   "sms": 120,
   "email": 10000
 }
 
-SMS_BASE_TEMPLATE = "%s . Using Agora Voting"
+SMS_BASE_TEMPLATE = "%s -- Agora Voting"
 
 EMAIL_BASE_TEMPLATE = "%s\n\n -- Agora Voting https://agoravoting.com"
 
-SMS_AUTH_CODE_URL = "https://agoravoting.example.com/#/election/%(authid)s/auth_code"
-EMAIL_AUTH_CODE_URL = "https://agoravoting.example.com/#/election/%(authid)s/auth_code/%(code)s"
+SMS_AUTH_CODE_URL = "https://agoravoting.example.com/#/election/%(authid)s/public/login"
+EMAIL_AUTH_CODE_URL = "https://agoravoting.example.com/#/election/%(authid)s/public/login/%(email)s/%(code)s"
 
+SEND_CODES_SMS_MAX = 3
+SEND_CODES_EMAIL_MAX = 3
+SIZE_CODE = 8
+MAX_GLOBAL_STR = 512
+MAX_EXTRA_FIELDS = 15
+MAX_SIZE_NAME_EXTRA_FIELD = 1024
 
 # Auth api settings
 from auth_settings import *

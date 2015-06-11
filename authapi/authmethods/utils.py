@@ -3,11 +3,14 @@ import re
 import os
 import binascii
 from datetime import timedelta
+from django.conf import settings
 from django.contrib.auth.models import User
 from django.http import HttpResponse
 from django.utils import timezone
 from .models import ColorList, Message, Code
 from api.models import ACL
+from captcha.models import Captcha
+from captcha.decorators import valid_captcha
 
 
 EMAIL_RX = re.compile(
@@ -90,7 +93,7 @@ def check_tlf_whitelisted(data):
 
     tlf = data['tlf']
     try:
-        item = ColorList.objects.get(key=ColorList.KEY_TLF, value=tlf)
+        item = ColorList.objects.get(key=ColorList.KEY_TLF, value=tlf, auth_event_id=data['auth_event'].id)
         if item.action == ColorList.ACTION_WHITELIST:
             data['whitelisted'] = True
         else:
@@ -109,7 +112,8 @@ def check_ip_whitelisted(data):
 
     ip_addr = data['ip_addr']
     try:
-        item = ColorList.objects.filter(key=ColorList.KEY_IP, value=ip_addr)
+        item = ColorList.objects.filter(key=ColorList.KEY_IP, value=ip_addr,
+                                        auth_event_id=data['auth_event'].id)
         for item in items:
             if item.action == ColorList.ACTION_WHITELIST:
                 data['whitelisted'] = True
@@ -134,7 +138,7 @@ def check_tlf_blacklisted(data):
     tlf = data['tlf']
     try:
         item = ColorList.objects.filter(key=ColorList.KEY_TLF, value=tlf,
-                action=ColorList.ACTION_BLACKLIST)[0]
+                action=ColorList.ACTION_BLACKLIST, auth_event_id=data['auth_event'].id)[0]
         return error("Blacklisted", error_codename="blacklisted")
     except:
         pass
@@ -156,7 +160,8 @@ def check_ip_blacklisted(data):
     ip_addr = data['ip_addr']
     try:
         item = ColorList.objects.filter(key=ColorList.KEY_IP, value=ip_addr,
-                action=ColorList.ACTION_BLACKLIST)[0]
+                action=ColorList.ACTION_BLACKLIST,
+                auth_event_id=data['auth_event'].id)[0]
         return error("Blacklisted", error_codename="blacklisted")
     except:
         pass
@@ -178,15 +183,18 @@ def check_tlf_total_max(data, **kwargs):
     if period:
         time_threshold = timezone.now() - timedelta(seconds=period)
         # Fix
-        item = Message.objects.filter(tlf=tlf, created__lt=time_threshold)
+        item = Message.objects.filter(tlf=tlf, created__lt=time_threshold,
+                                      auth_event_id=data['auth_event'].id)
     else:
-        item = Message.objects.filter(tlf=tlf)
+        item = Message.objects.filter(tlf=tlf, auth_event_id=data['auth_event'].id)
     if len(item) >= total_max:
         c1 = ColorList(action=ColorList.ACTION_BLACKLIST,
-                       key=ColorList.KEY_IP, value=ip_addr)
+                       key=ColorList.KEY_IP, value=ip_addr,
+                       auth_event_id=data['auth_event'].id)
         c1.save()
         c2 = ColorList(action=ColorList.ACTION_BLACKLIST,
-                       key=ColorList.KEY_TLF, value=tlf)
+                       key=ColorList.KEY_TLF, value=tlf,
+                       auth_event_id=data['auth_event'].id)
         c2.save()
         return error("Blacklisted", error_codename="blacklisted")
     return RET_PIPE_CONTINUE
@@ -202,21 +210,22 @@ def check_ip_total_max(data, **kwargs):
         return RET_PIPE_CONTINUE
 
     ip_addr = data['ip_addr']
-    item = Message.objects.filter(ip=ip_addr)
+    item = Message.objects.filter(ip=ip_addr, auth_event_id=data['auth_event'].id)
     if len(item) >= total_max:
         cl = ColorList(action=ColorList.ACTION_BLACKLIST,
-                       key=ColorList.KEY_IP, value=ip_addr)
+                       key=ColorList.KEY_IP, value=ip_addr,
+                       auth_event_id=data['auth_event'].id)
         cl.save()
         return error("Blacklisted", error_codename="blacklisted")
     return RET_PIPE_CONTINUE
 
 
-def check_sms_code(req, ae, **kwargs):
+def check_sms_code(data, **kwargs):
     time_thr = timezone.now() - timedelta(seconds=kwargs.get('timestamp'))
     try:
-        u = User.objects.get(userdata__tlf=req.get('tlf'), userdata__event=ae)
-        code = Code.objects.get(user=u.pk, code=req.get('code'),
-                created__gt=time_thr)
+        u = User.objects.get(userdata__tlf=data['tlf'], userdata__event=data['auth_event'])
+        code = Code.objects.get(user=u.pk, code=data['code'],
+                created__gt=time_thr, auth_event_id=data['auth_event'].id)
     except:
         return error('Invalid code.', error_codename='check_sms_code')
     return RET_PIPE_CONTINUE
@@ -249,7 +258,8 @@ def check_total_max(data, **kwargs):
 
 
 def check_total_connection(data, **kwargs):
-    conn = Connection.objects.filter(tlf=req.get('tlf')).count()
+    conn = Connection.objects.filter(tlf=req.get('tlf'),
+                                     auth_event_id=data['auth_event'].id).count()
     if conn >= kwargs.get('times'):
         return error('Exceeded the level os attempts',
                 error_codename='check_total_connection')
@@ -260,111 +270,240 @@ def check_total_connection(data, **kwargs):
 
 def check_pipeline(request, ae, step='register'):
     req = json.loads(request.body.decode('utf-8'))
-    data = {'ip_addr': get_client_ip(request), 'tlf': req.get('tlf')}
+    if req.get('tlf'):
+        req['tlf'] = get_cannonical_tlf(req['tlf'])
+    data = {
+        'ip_addr': get_client_ip(request),
+        'tlf': req.get('tlf', None),
+        'code': req.get('code', None),
+        'auth_event': ae
+    }
 
     pipeline = ae.auth_method_config.get('pipeline').get('%s-pipeline' % step)
     for pipe in pipeline:
-        if pipe[0] == 'check_sms_code':
-            check = getattr(eval(pipe[0]), '__call__')(req, ae, **pipe[1])
-        else:
-            check = getattr(eval(pipe[0]), '__call__')(data, **pipe[1])
+        check = getattr(eval(pipe[0]), '__call__')(data, **pipe[1])
         if check:
             data.update(json.loads(check.content.decode('utf-8')))
             data['status'] = check.status_code
+            if data.get('auth_event'):
+                data.pop('auth_event')
+            if data.get('code'):
+                data.pop('code')
             return data
-    return
+    return RET_PIPE_CONTINUE
 
 
 # Checkers census, register and authentication
-def check_value(definition, field, step='register'):
+def check_field_type(definition, field, step='register'):
     msg = ''
-    if step == 'authentication' and not definition.get('required_on_authentication'):
+    if field is not None:
+        if isinstance(field, str):
+            if definition.get('type') == 'int' or definition.get('type') == 'bool':
+                msg += "Field %s type incorrect, value %s" % (definition.get('name'), field)
+            if len(field) > settings.MAX_GLOBAL_STR:
+                msg += "Field %s incorrect len" % definition.get('name')
+        elif isinstance(field, bool):
+            if definition.get('type') != 'bool':
+                msg += "Field %s type incorrect, value %s" % (definition.get('name'), field)
+        elif isinstance(field, int):
+            if definition.get('type') != 'int':
+                msg += "Field %s type incorrect, value %s" % (definition.get('name'), field)
+    return msg
+
+
+def check_field_value(definition, field, step='register'):
+    msg = ''
+    if step == 'authenticate' and not definition.get('required_on_authentication'):
+        return msg
+    if step == 'census' and definition.get('type') == 'captcha':
         return msg
     if field is None:
         if definition.get('required'):
             msg += "Field %s is required" % definition.get('name')
     else:
         if isinstance(field, str):
-            if definition.get('type') == 'int':
-                msg += "Field %s type incorrect, value %s" % (definition.get('name'), field)
             if definition.get('min') and len(field) < definition.get('min'):
                 msg += "Field %s min incorrect, value %s" % (definition.get('name'), field)
             if definition.get('max') and len(field) > definition.get('max'):
                 msg += "Field %s max incorrect, value %s" % (definition.get('name'), field)
         elif isinstance(field, int):
-            if definition.get('type') != 'int':
-                msg += "Field %s type incorrect, value %s" % (definition.get('name'), field)
             if definition.get('min') and field < definition.get('min'):
                 msg += "Field %s min incorrect, value %s" % (definition.get('name'), field)
             if definition.get('max') and field > definition.get('max'):
                 msg += "Field %s max incorrect, value %s" % (definition.get('name'), field)
-        if definition.get('name') == 'email':
+        if definition.get('type') == 'email':
             if not email_constraint(field):
                 msg += "Field email regex incorrect, value %s" % field
         if definition.get('name') == 'dni':
             if not dni_constraint(field):
                 msg += "Field dni regex incorrect, value %s" % field
-        elif definition.get('regex'):
+        if definition.get('regex'):
             a = re.compile(definition.get('regex'))
             if not a.match(string):
                 msg += "Field %s regex incorrect, value %s" % (definition.get('name'), field)
     return msg
 
 
-def check_fields_in_request(req, ae, step='register'):
+def check_captcha(code, answer):
+    if not code or not answer or not isinstance(code, str):
+        return 'Invalid captcha'
+    captcha = {'captcha_code': code, 'captcha_answer': answer}
+    if not valid_captcha(captcha):
+        return 'Invalid captcha'
+    return ''
+
+
+def check_fields_in_request(req, ae, step='register', validation=True):
     msg = ''
     if ae.extra_fields:
+        if len(req) > settings.MAX_EXTRA_FIELDS * 2:
+            return "Number of fields is bigger than allowed fields."
         for extra in ae.extra_fields:
-            msg += check_value(extra, req.get(extra.get('name')))
+            msg += check_field_type(extra, req.get(extra.get('name')), step)
+            if validation:
+                msg += check_field_value(extra, req.get(extra.get('name')), step)
+                if not msg and extra.get('type') == 'captcha' and step != 'census':
+                    if (step == 'register' and extra.get('required')) or\
+                            (step == 'authenticate' and extra.get('required_on_authentication')):
+                        msg += check_captcha(req.get('captcha_code'), req.get(extra.get('name')))
     return msg
 
 
-def create_user(req, ae):
+def have_captcha(ae, step='register'):
+    if ae.extra_fields:
+        for extra in ae.extra_fields:
+            if extra.get('type') == 'captcha':
+                if step == 'authenticate' and extra.get('required_on_authentication') == False:
+                    return False
+                return True
+    return False
+
+
+def metadata_repeat(req, user, uniques):
+    for unique in uniques:
+        metadata = json.loads(user.userdata.metadata)
+        if metadata.get(unique.get('name')) == req.get(unique.get('name')):
+            return "%s %s repeat." % (unique.get('name'), req.get(unique.get('name')))
+    return ''
+
+
+def exist_user(req, ae, get_repeated=False):
+    msg = ''
+    if req.get('email'):
+        try:
+            user = User.objects.get(email=req.get('email'), userdata__event=ae)
+            msg += "Email %s repeat." % req.get('email')
+        except:
+            pass
+    if req.get('tlf'):
+        try:
+            tlf = get_cannonical_tlf(req['tlf'])
+            user = User.objects.get(userdata__tlf=tlf, userdata__event=ae)
+            msg += "Tel %s repeat." % req.get('tlf')
+        except:
+            pass
+
+    if not msg:
+        if not ae.extra_fields:
+            return ''
+        uniques = []
+        for extra in ae.extra_fields:
+            if 'unique' in extra.keys() and extra.get('unique'):
+                uniques.append(extra)
+        for user in User.objects.filter(userdata__event=ae):
+            msg += metadata_repeat(req, user, uniques)
+            if msg:
+                break
+    if not msg:
+        return ''
+    if get_repeated:
+        return {'msg': msg, 'user': user}
+    else:
+        return msg
+
+def get_cannonical_tlf(tlf):
+    from authmethods.sms_provider import SMSProvider
+    con = SMSProvider.get_instance()
+    return con.get_canonical_format(tlf)
+
+
+def edit_user(user, req, ae):
+    if ae.auth_method == 'email':
+        user.email = req.get('email')
+        req.pop('email')
+    elif ae.auth_method == 'sms':
+        if req['tlf']:
+            user.userdata.tlf = get_cannonical_tlf(req['tlf'])
+        else:
+            user.userdata.tlf = req['tlf']
+        req.pop('tlf')
+    if ae.extra_fields:
+        for extra in ae.extra_fields:
+            if extra.get('type') == 'email':
+                user.email = req.get(extra.get('name'))
+                req.pop(extra.get('name'))
+            elif extra.get('type') == 'tlf':
+                if req[extra.get('name')]:
+                    user.userdata.tlf = get_cannonical_tlf(req[extra.get('name')])
+                else:
+                    user.userdata.tlf = req[extra.get('name')]
+                req.pop(extra.get('name'))
+            elif extra.get('type') == 'password':
+                user.set_password(req.get(extra.get('name')))
+                req.pop(extra.get('name'))
+    user.save()
+    user.userdata.metadata = json.dumps(req)
+    user.userdata.save()
+    return user
+
+
+def create_user(req, ae, active=False):
     user = random_username()
     u = User(username=user)
-    u.is_active = False
-
-    if req.get('email'):
-        u.email = req.get('email')
-        req.pop('email')
+    u.is_active = active
     u.save()
-
-    if req.get('tlf'):
-        u.userdata.tlf = req.get('tlf')
-        req.pop('tlf')
-
     u.userdata.event = ae
-    u.userdata.metadata = json.dumps(req)
     u.userdata.save()
-    return u
+    return edit_user(u, req, ae)
 
 
 def check_metadata(req, user):
     meta = json.loads(user.userdata.metadata)
-    for field in user.userdata.event.extra_fields:
+    extra = user.userdata.event.extra_fields
+    if not extra:
+        return ""
+
+    for field in extra:
         if field.get('required_on_authentication'):
             name = field.get('name')
-            if (name == 'email'):
+            typee = field.get('type')
+            if (typee == 'email'):
                 if user.email != req.get(name):
-                    return "Incorrent authentication."
-            elif (name == 'tlf'):
+                    return "Incorrect authentication."
+            elif (typee == 'tlf'):
                 if user.userdata.tlf != req.get(name):
-                    return "Incorrent authentication."
+                    return "Incorrect authentication."
             else:
                 if meta.get(name) != req.get(name):
-                    return "Incorrent authentication."
+                    return "Incorrect authentication."
     return ""
 
 
 def give_perms(u, ae):
-    give_perms = ae.auth_method_config.get('config').get('give_perms')
-    if give_perms:
-        obj = give_perms.get('object_type')
-        obj_id = give_perms.get('object_id', 0)
-        for perm in give_perms.get('perms'):
+    if u.is_active: # Active users don't give perms. Avoid will send code
+        return ''
+    pipe = ae.auth_method_config.get('pipeline')
+    if not pipe:
+        return 'Bad config'
+    give_perms = pipe.get('give_perms', [])
+    for perms in give_perms:
+        obj = perms.get('object_type')
+        obj_id = perms.get('object_id', 0)
+        if obj_id == 'UserDataId':
+            obj_id = u.pk
+        elif obj_id == 'AuthEventId':
+            obj_id = ae.pk
+        for perm in perms.get('perms'):
             acl = ACL(user=u.userdata, object_type=obj, perm=perm, object_id=obj_id)
             acl.save()
-    acl = ACL(user=u.userdata, object_type='UserData', perm='edit', object_id=u.pk)
-    acl.save()
-    acl = ACL(user=u.userdata, object_type='Vote', perm='create', object_id=ae.pk)
-    acl.save()
+    return ''

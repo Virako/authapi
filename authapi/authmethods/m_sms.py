@@ -3,8 +3,9 @@ from django.conf import settings
 from django.conf.urls import patterns, url
 from django.contrib.auth.models import User
 from django.shortcuts import get_object_or_404
-from utils import genhmac, send_code
+from utils import genhmac, send_codes
 
+import plugins
 from . import register_method
 from authmethods.utils import *
 
@@ -12,16 +13,13 @@ from authmethods.utils import *
 class Sms:
     DESCRIPTION = 'Provides authentication using an SMS code.'
     CONFIG = {
-        'SMS_PROVIDER': 'console',
-        'SMS_DOMAIN_ID': '',
-        'SMS_LOGIN': '',
-        'SMS_PASSWORD': '',
-        'SMS_URL': '',
-        'SMS_SENDER_ID': '',
-        'SMS_VOICE_LANG_CODE': '',
-        'sms-message': 'Confirm your sms code: ',
+        'msg': 'Enter in %(url)s and put this code %(code)s'
     }
     PIPELINES = {
+        'give_perms': [
+            {'object_type': 'UserData', 'perms': ['edit',], 'object_id': 'UserDataId' },
+            {'object_type': 'AuthEvent', 'perms': ['vote',], 'object_id': 'AuthEventId' }
+        ],
         "register-pipeline": [
             ["check_whitelisted", {"field": "tlf"}],
             ["check_whitelisted", {"field": "ip"}],
@@ -30,60 +28,106 @@ class Sms:
             ["check_total_max", {"field": "ip", "max": 8}],
             ["check_total_max", {"field": "tlf", "max": 7}],
             ["check_total_max", {"field": "tlf", "period": 1440, "max": 5}],
-            ["check_total_max", {"field": "tlf", "period": 60, "max": 3}],
         ],
         "authenticate-pipeline": [
             #['check_total_connection', {'times': 5 }],
-            ['check_sms_code', {'timestamp': 5 }]
+            #['check_sms_code', {'timestamp': 5 }]
         ]
     }
+    USED_TYPE_FIELDS = ['tlf']
 
     tlf_definition = { "name": "tlf", "type": "text", "required": True, "min": 4, "max": 20, "required_on_authentication": True }
     code_definition = { "name": "code", "type": "text", "required": True, "min": 6, "max": 255, "required_on_authentication": True }
 
+    def check_config(self, config):
+        """ Check config when create auth-event. """
+        msg = ''
+        for c in config:
+            if c != "msg":
+                msg += "Invalid config: %s not possible.\n" % c
+        return msg
+
     def census(self, ae, request):
         req = json.loads(request.body.decode('utf-8'))
+        validation = req.get('field-validation', 'enabled') == 'enabled'
+        data = {'status': 'ok'}
 
         msg = ''
         current_tlfs = []
-        for r in req:
+        for r in req.get('census'):
+            if r.get('tlf'):
+                r['tlf'] = get_cannonical_tlf(r.get('tlf'))
             tlf = r.get('tlf')
-            msg += check_value(self.tlf_definition, tlf)
-            msg += check_fields_in_request(r, ae)
-            if User.objects.filter(userdata__tlf=tlf, userdata__event=ae):
-                msg += "Tlf %s repeat." % tlf
-            if tlf in current_tlfs:
-                msg += "Tlf %s repeat." % tlf
-            current_tlfs.append(tlf)
-        if msg:
+            if isinstance(tlf, str):
+                tlf = tlf.strip()
+            msg += check_field_type(self.tlf_definition, tlf)
+            if validation:
+                msg += check_field_value(self.tlf_definition, tlf)
+            msg += check_fields_in_request(r, ae, 'census', validation=validation)
+            if validation:
+                msg += exist_user(r, ae)
+                if tlf in current_tlfs:
+                    msg += "Tlf %s repeat." % tlf
+                current_tlfs.append(tlf)
+            else:
+                if msg:
+                    msg = ''
+                    continue
+                exist = exist_user(r, ae)
+                if exist and not exist.count('None'):
+                    continue
+                used = r.get('status', 'registered') == 'used'
+                u = create_user(r, ae, used)
+                give_perms(u, ae)
+        if msg and validation:
             data = {'status': 'nok', 'msg': msg}
             return data
 
-        for r in req:
-            u = create_user(r, ae)
-            give_perms(u, ae)
-        return {'status': 'ok'}
+        if validation:
+            for r in req.get('census'):
+                used = r.get('status', 'registered') == 'used'
+                u = create_user(r, ae, used)
+                give_perms(u, ae)
+        return data
 
     def register(self, ae, request):
         req = json.loads(request.body.decode('utf-8'))
-
-        msg = ''
-        tlf = req.get('tlf')
-        msg += check_value(self.tlf_definition, tlf)
-        msg += check_fields_in_request(req, ae)
-        if User.objects.filter(userdata__tlf=tlf, userdata__event=ae):
-            msg += "Tlf %s repeat." % tlf
-        if msg:
-            data = {'status': 'nok', 'msg': msg}
-            return data
-
         msg = check_pipeline(request, ae)
         if msg:
             return msg
 
-        u = create_user(req, ae)
-        give_perms(u, ae)
-        send_code(u)
+        msg = ''
+        if req.get('tlf'):
+            req['tlf'] = get_cannonical_tlf(req.get('tlf'))
+        tlf = req.get('tlf')
+        if isinstance(tlf, str):
+            tlf = tlf.strip()
+        msg += check_field_type(self.tlf_definition, tlf)
+        msg += check_field_value(self.tlf_definition, tlf)
+        msg += check_fields_in_request(req, ae)
+        if msg:
+            data = {'status': 'nok', 'msg': msg}
+            return data
+        msg_exist = exist_user(req, ae, get_repeated=True)
+        if msg_exist:
+            u = msg_exist.get('user')
+            if u.is_active:
+                msg += msg_exist.get('msg') + "Already registered."
+            codes = Code.objects.filter(user=u.userdata).count()
+            if codes > settings.SEND_CODES_SMS_MAX:
+                msg += msg_exist.get('msg')  + "Maximun number of codes sent."
+        else:
+            u = create_user(req, ae)
+            msg += give_perms(u, ae)
+
+        if msg:
+            data = {'status': 'nok', 'msg': msg}
+            return data
+
+        result = plugins.call("extend_send_sms", ae, 1)
+        if result:
+            return {'status': 'nok', 'msg': result}
+        send_codes.apply_async(args=[[u.id,]])
         return {'status': 'ok'}
 
     def authenticate_error(self):
@@ -94,19 +138,34 @@ class Sms:
         req = json.loads(request.body.decode('utf-8'))
 
         msg = ''
+        if req.get('tlf'):
+            req['tlf'] = get_cannonical_tlf(req.get('tlf'))
         tlf = req.get('tlf')
-        msg += check_value(self.tlf_definition, tlf)
-        msg += check_value(self.code_definition, req.get('code'))
-        msg += check_fields_in_request(req, ae)
+        if isinstance(tlf, str):
+            tlf = tlf.strip()
+        msg += check_field_type(self.tlf_definition, tlf, 'authenticate')
+        msg += check_field_value(self.tlf_definition, tlf, 'authenticate')
+        msg += check_field_type(self.code_definition, req.get('code'), 'authenticate')
+        msg += check_field_value(self.code_definition, req.get('code'), 'authenticate')
+        msg += check_fields_in_request(req, ae, 'authenticate')
         if msg:
             data = {'status': 'nok', 'msg': msg}
             return data
+
+        try:
+            u = User.objects.get(userdata__tlf=tlf, userdata__event=ae)
+        except:
+            return {'status': 'nok', 'msg': 'User not exist.'}
+
+        code = Code.objects.filter(user=u.userdata,
+                code=req.get('code')).order_by('created').first()
+        if not code:
+            return {'status': 'nok', 'msg': 'Invalid code.'}
 
         msg = check_pipeline(request, ae, 'authenticate')
         if msg:
             return msg
 
-        u = get_object_or_404(User, userdata__tlf=tlf, userdata__event=ae)
         msg = check_metadata(req, u)
         if msg:
             data = {'status': 'nok', 'msg': msg}

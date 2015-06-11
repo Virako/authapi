@@ -1,28 +1,36 @@
 import json
 from django.conf import settings
 from django.contrib.auth.models import User
-from django.core.exceptions import PermissionDenied
 from django.http import HttpResponse, HttpResponseBadRequest
 from django.views.generic import View
 from django.shortcuts import get_object_or_404
 
-from authmethods import auth_authenticate, METHODS, auth_register, auth_census
-from utils import genhmac, paginate, VALID_FIELDS, VALID_PIPELINES
-from utils import check_authmethod, check_pipeline, check_extra_fields, check_config
+import plugins
+from authmethods import (
+    auth_authenticate,
+    auth_census,
+    auth_register,
+    check_config,
+    METHODS,
+)
+from utils import (
+    check_authmethod,
+    check_extra_fields,
+    check_pipeline,
+    genhmac,
+    paginate,
+    permission_required,
+    random_code,
+    send_mail,
+    VALID_FIELDS,
+    VALID_PIPELINES,
+)
 from .decorators import login_required, get_login_user
-from .models import AuthEvent, ACL, CreditsAction
+from .models import AuthEvent, ACL
 from .models import User, UserData
 from .tasks import census_send_auth_task
 from django.db.models import Q
-
-
-def permission_required(user, object_type, permission, object_id=0):
-    if user.is_superuser:
-        return
-    if object_id and user.userdata.has_perms(object_type, permission, 0):
-        return
-    if not user.userdata.has_perms(object_type, permission, object_id):
-        raise PermissionDenied('Permission required: ' + permission)
+from captcha.views import generate_captcha
 
 
 class Test(View):
@@ -47,6 +55,18 @@ class Test(View):
         return HttpResponse(jsondata, content_type='application/json')
 test = Test.as_view()
 
+class CensusDelete(View):
+    ''' Delete census in the auth-event '''
+    def post(self, request, pk):
+        ae = get_object_or_404(AuthEvent, pk=pk)
+        req = json.loads(request.body.decode('utf-8'))
+        for uid in req.get('user-ids'):
+          u = get_object_or_404(User, pk=uid, userdata__event=ae)
+          for acl in u.userdata.acls.all():
+              acl.delete()
+          u.delete()
+        return HttpResponse("ok", status=200, content_type='application/json')
+census_delete = login_required(CensusDelete.as_view())
 
 class Census(View):
     ''' Add census in the auth-event '''
@@ -65,11 +85,22 @@ class Census(View):
     def get(self, request, pk):
         permission_required(request.user, 'AuthEvent', 'edit', pk)
         e = get_object_or_404(AuthEvent, pk=pk)
-        acls = ACL.objects.filter(object_type='Vote', perm='create', object_id=pk)
+        acls = ACL.objects.filter(object_type='AuthEvent', perm='vote', object_id=pk)
         userids = []
+        object_list = []
+        users = {}
+        data = {}
         for acl in acls:
             userids.append(acl.user.pk)
-        jsondata = json.dumps({'userids': userids})
+            users[acl.user.user.username] = acl.user.user.email
+            metadata = acl.user.serialize_data()
+            data[acl.user.user.username] = metadata
+            object_list.append({
+              "id": acl.user.pk,
+              "username": acl.user.user.username,
+              "metadata": metadata
+            })
+        jsondata = json.dumps({'userids': userids, 'users': users, 'data': data, 'object_list': object_list})
         return HttpResponse(jsondata, content_type='application/json')
 census = login_required(Census.as_view())
 
@@ -83,6 +114,9 @@ class Authenticate(View):
         else:
             e = get_object_or_404(AuthEvent, pk=pk)
 
+        extend_auth = plugins.call("extend_auth", e)
+        if extend_auth:
+            return extend_auth
         try:
             data = auth_authenticate(e, request)
         except:
@@ -118,7 +152,10 @@ class Register(View):
     def post(self, request, pk):
         e = get_object_or_404(AuthEvent, pk=pk)
         if (e.census == 'close'):
-            permission_required(request.user, 'UserEvent', 'edit', pk)
+            jsondata = json.dumps({
+                "msg": "Register disable: the auth-event is close"
+            })
+            return HttpResponse(jsondata, status=400, content_type='application/json')
         if e.census == 'open' and e.status != 'started': # register is closing
             jsondata = json.dumps({
                 "msg": "Register disable: the auth-event doesn't started"
@@ -271,9 +308,13 @@ class AuthEventView(View):
         if pk is None: # create
             permission_required(request.user, 'AuthEvent', 'create')
 
-            auth_method = req['auth_method']
+            auth_method = req.get('auth_method', '')
             msg = check_authmethod(auth_method)
-            
+            if msg:
+                data = {'msg': msg}
+                jsondata = json.dumps(data)
+                return HttpResponse(jsondata, status=400, content_type='application/json')
+
             auth_method_config = {
                     "config": METHODS.get(auth_method).CONFIG,
                     "pipeline": METHODS.get(auth_method).PIPELINES
@@ -284,9 +325,9 @@ class AuthEventView(View):
 
             extra_fields = req.get('extra_fields', None)
             if extra_fields:
-                msg += check_extra_fields(extra_fields)
+                msg += check_extra_fields(extra_fields, METHODS.get(auth_method).USED_TYPE_FIELDS)
 
-            census = req.get('census', 'close')
+            census = req.get('census', '')
             if not census in ('open', 'close'):
                 msg += "Invalid type of census\n"
 
@@ -311,12 +352,21 @@ class AuthEventView(View):
                     object_type='UserData', object_id=ae.id)
             acl.save()
 
+            # if necessary, generate captchas
+            from authmethods.utils import have_captcha
+            if have_captcha(ae):
+                generate_captcha(settings.PREGENERATION_CAPTCHA)
+
         else: # edit
             permission_required(request.user, 'AuthEvent', 'edit', pk)
-            auth_method = req['auth_method']
+            auth_method = req.get('auth_method', '')
             msg = check_authmethod(auth_method)
+            if msg:
+                data = {'msg': msg}
+                jsondata = json.dumps(data)
+                return HttpResponse(jsondata, status=400, content_type='application/json')
 
-            config = req.get('config', None)
+            config = req.get('auth_method_config', None)
             if config:
                 msg += check_config(config, auth_method)
 
@@ -427,14 +477,73 @@ authevent_module = AuthEventModule.as_view()
 
 
 class UserView(View):
-    def get(self, request, pk):
+    def post(self, request):
+        ''' Edit user. Only can change password. '''
+        pk = request.user.pk
+        user = request.user
+
+        permission_required(user, 'UserData', 'edit', pk)
+        permission_required(user, 'AuthEvent', 'create')
+
+        try:
+            req = json.loads(request.body.decode('utf-8'))
+        except:
+            bad_request = json.dumps({"error": "bad_request"})
+            return HttpResponseBadRequest(bad_request, content_type='application/json')
+
+        old_pwd = req.get('old_pwd')
+        new_pwd = req.get('new_pwd')
+        if not old_pwd or not new_pwd:
+            jsondata = json.dumps({'status': 'nok'})
+            return HttpResponse(jsondata, status=400, content_type='application/json')
+
+        if not user.check_password(old_pwd):
+            jsondata = json.dumps({'status': 'nok', 'msg': 'Invalid old password'})
+            return HttpResponse(jsondata, status=400, content_type='application/json')
+
+        user.set_password(new_pwd)
+        user.save()
+        jsondata = json.dumps({'status': 'ok'})
+        return HttpResponse(jsondata, content_type='application/json')
+
+    def get(self, request, pk=None):
         ''' Get user info '''
-        permission_required(request.user, 'UserData', 'view', pk)
-        user = get_object_or_404(UserData, pk=pk)
-        jsondata = json.dumps(user.serialize())
+        userdata = None
+        if pk is None:
+            pk = request.user.pk
+            userdata = request.user.userdata
+        permission_required(request.user, 'UserData', 'edit', pk)
+        if userdata is None:
+            userdata = get_object_or_404(UserData, pk=pk)
+        data = userdata.serialize()
+        extend_info = plugins.call("extend_user_info", userdata.user)
+        if extend_info:
+            for info in extend_info:
+                data.update(info.serialize())
+        jsondata = json.dumps(data)
         return HttpResponse(jsondata, content_type='application/json')
 user = login_required(UserView.as_view())
 
+
+class UserResetPwd(View):
+    ''' Reset password. '''
+    def post(self, request):
+        pk = request.user.pk
+        user = request.user
+
+        permission_required(user, 'UserData', 'edit', pk)
+        permission_required(user, 'AuthEvent', 'create')
+
+        new_pwd = random_code(8)
+        send_mail.apply_async(args=[
+                'Reset password',
+                'This is your new password: %s' % new_pwd,
+                user.email])
+        user.set_password(new_pwd)
+        user.save()
+        jsondata = json.dumps({'status': 'ok'})
+        return HttpResponse(jsondata, content_type='application/json')
+reset_pwd = login_required(UserResetPwd.as_view())
 
 
 class UserAuthEvent(View):
@@ -450,37 +559,17 @@ class UserAuthEvent(View):
 user_auth_event = login_required(UserAuthEvent.as_view())
 
 
-class CreditsActionView(View):
-    def post(self, request):
-        ''' Create new action of add_credit in mode create '''
-
-        try:
-            req = json.loads(request.body.decode('utf-8'))
-        except:
-            bad_request = json.dumps({"error": "bad_request"})
-            return HttpResponseBadRequest(bad_request, content_type='application/json')
-        pack_id = req.get("pack_id")
-        quantity = req.get("num_credits")
-        payment = req.get("payment_method")
-        # TODO create paypal_url
-        paypal_url = 'foo'
-        action = CreditsAction(user=request.user.userdata, quantity=quantity,
-                payment_metadata={'payment_method': payment})
-        action.save()
-        jsondata = json.dumps({'paypal_url': paypal_url})
-        return HttpResponse(jsondata, content_type='application/json')
-creditsaction = login_required(CreditsActionView.as_view())
-
 class CensusSendAuth(View):
     def post(self, request, pk):
         ''' Send authentication emails to the whole census '''
         permission_required(request.user, 'AuthEvent', 'edit', pk)
 
+        data = {'msg': 'Sent successful'}
         # first, validate input
         e = get_object_or_404(AuthEvent, pk=pk)
         if e.status != 'started':
-          jsondata = json.dumps({'error': 'AuthEvent with id = %d has not started' % pk})
-          return HttpResponseBadRequest(json, content_type='application/json')
+          jsondata = json.dumps({'error': 'AuthEvent with id = %s has not started' % pk})
+          return HttpResponseBadRequest(jsondata, content_type='application/json')
 
         invalid_json = json.dumps({'error': "Invalid json"})
         try:
@@ -489,24 +578,25 @@ class CensusSendAuth(View):
             return HttpResponseBadRequest(invalid_json, content_type='application/json')
 
         userids = req.get("user-ids", None)
-        templ = req.get("template", None)
-        if templ is None:
-            census_send_auth_task.apply_async(args=[pk, templ, userids])
+        if req.get('msg') or req.get('subject'):
+            config = {}
+            if req.get('msg'):
+                config['msg'] = req.get('msg')
+            if req.get('subject'):
+                config['subject'] = req.get('subject')
+        else:
+            msg = census_send_auth_task(pk, None, userids)
+            if msg:
+                data['msg'] = msg
             return HttpResponse("", content_type='application/json')
 
-        if type(templ) != str or len(templ) > settings.MAX_AUTH_MSG_SIZE[e.auth_method] or\
-            not "__CODE__" in templ or not "__LINK__" in templ:
-            return HttpResponseBadRequest(invalid_json, content_type='application/json')
+        if config.get('msg', None) is not None:
+            if type(config.get('msg')) != str or len(config.get('msg')) > settings.MAX_AUTH_MSG_SIZE[e.auth_method]:
+                return HttpResponseBadRequest(invalid_json, content_type='application/json')
 
-        census_send_auth_task.apply_async(args=[pk, templ, userids])
-        return HttpResponse("", content_type='application/json')
+        msg = census_send_auth_task(pk, config, userids)
+        if msg:
+            data['msg'] = msg
+        jsondata = json.dumps(data)
+        return HttpResponse(jsondata, content_type='application/json')
 census_send_auth = login_required(CensusSendAuth.as_view())
-
-def available_packs(request):
-    jsondata = json.dumps(settings.AVAILABLE_PACKS)
-    return HttpResponse(jsondata, content_type='application/json')
-
-
-def available_payment_methods(request):
-    jsondata = json.dumps(settings.AVAILABLE_PAYMENT_METHODS)
-    return HttpResponse(jsondata, content_type='application/json')
